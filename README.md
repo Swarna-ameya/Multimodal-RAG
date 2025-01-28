@@ -64,12 +64,13 @@ aws configure
 
 ## Run the applications:
 
-### start document manager
+### start document manager (terminal-1)
+Upload files and preview document
 ```bash
 streamlit run document_manager.py
 ```
 
-### start the chat interface
+### start the chat interface (terminal-2)
 ```bash
 streamlit run chat_interface.py
 ```
