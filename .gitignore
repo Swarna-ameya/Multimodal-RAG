@@ -1,0 +1,4 @@
+vector_store/
+venvb/
+__pycache__
+data/

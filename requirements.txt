@@ -1,0 +1,15 @@
+boto3
+botocore
+pypdfium2
+faiss-cpu
+PyMuPDF
+langchain
+langchain-community
+langchain-aws
+tabula-py
+tqdm
+streamlit
+jpype1
+requests
+numpy
+ipython
