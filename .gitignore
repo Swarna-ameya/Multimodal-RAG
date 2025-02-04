@@ -3,3 +3,4 @@ venvb/
 __pycache__
 data/
 app.py
+chatbot_validation.log

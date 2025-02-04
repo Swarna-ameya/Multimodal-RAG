@@ -1,23 +1,80 @@
+import os
 import streamlit as st
+import logging
+from response_verifier import verify_response
 from rag_backend import (
     check_aws_credentials,
     load_or_initialize_stores,
     generate_multimodal_embeddings,
     invoke_claude_3_multimodal,
-    save_stores,
-    clear_history
+    save_stores
 )
 import numpy as np
 
-def main():
-    # Set page configuration
-    st.set_page_config(layout="wide")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('chatbot_validation.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+def handle_clear_chat():
+    """Clear only the chat history from current session"""
+    st.session_state.chat_history = []
+    st.rerun()
+
+def generate_and_verify_response(query, matched_items):
+    """Generate response and verify its quality, logging verification details"""
+    max_attempts = 3
+    attempt = 0
     
-    # Add custom CSS for chat styling
-    st.markdown(
-        """
+    while attempt < max_attempts:
+        # Generate initial response
+        response = invoke_claude_3_multimodal(query, matched_items)
+        
+        # Verify response quality
+        is_valid, feedback = verify_response(response, matched_items, query)
+        
+        # Log verification results
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Response Verification - Attempt {attempt + 1}/{max_attempts}")
+        logger.info(f"Query: {query}")
+        logger.info(f"Validation Result: {'PASSED' if is_valid else 'FAILED'}")
+        if not is_valid:
+            logger.info("Feedback for improvement:")
+            for point in feedback:
+                logger.info(f"- {point}")
+        logger.info(f"{'='*50}\n")
+        
+        if is_valid:
+            return response
+        
+        # If invalid, regenerate with feedback
+        attempt += 1
+        if attempt < max_attempts:
+            # Add feedback to the prompt for improvement but don't show in chat
+            enhanced_query = f"{query}\n\nImprove the response considering: {'; '.join(feedback)}"
+            query = enhanced_query
+    
+    # If all attempts failed, log warning but return best effort response
+    logger.warning("Maximum verification attempts reached. Returning best effort response.")
+    return response
+
+def main():
+    st.set_page_config(layout="wide", page_title="Chat Interface")
+    
+    # Custom CSS for styling
+    st.markdown("""
         <style>
-        /* Chat message styles */
         .chat-message {
             padding: 1rem;
             border-radius: 0.5rem;
@@ -33,33 +90,6 @@ def main():
             background-color: #f0f0f0;
             margin-right: 2rem;
         }
-        .message-header {
-            font-weight: bold;
-            margin-bottom: 0.5rem;
-        }
-        
-        /* Clear History button styles */
-        .clear-button {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            z-index: 1000;
-            background-color: #ff4b4b;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            padding: 8px 16px;
-            font-size: 16px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            transition: background-color 0.3s;
-        }
-        
-        .clear-button:hover {
-            background-color: #ff3333;
-        }
         
         /* Hide default Streamlit elements */
         div[data-testid="stToolbar"] {
@@ -69,67 +99,53 @@ def main():
             display: none;
         }
         
-        /* Title styles */
-        div h1 {
-            color: #31333F;
-            margin: 0 !important;
+        /* Style for clear button */
+        button[data-testid="clear_chat"] {
+            background-color: #FF0000 !important;
+            color: white !important;
+        }
+        button[data-testid="clear_chat"]:hover {
+            background-color: #CC0000 !important;
         }
         </style>
-        
-        <!-- Clear History Button with Trash Icon -->
-        <button class="clear-button" onclick="window.location.href='?clear=1'">
-            <svg viewBox="0 0 24 24" width="16" height="16" style="fill: currentColor;">
-                <path d="M19 6h-3.5l-1-1h-5l-1 1H5v2h14V6zM6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V8H6v11z"/>
-            </svg>
-            Clear History
-        </button>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Title with icon
-    st.markdown("""
-        <div style="display: flex; align-items: center; gap: 10px;">
-            <svg width="40" height="40" viewBox="0 0 24 24" style="fill: #0066cc;">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-            </svg>
-            <h1>Chat Interface</h1>
-        </div>
-        """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+    
+    # Initialize session state
+    initialize_session_state()
+    
+    # Handle clear chat from URL parameter
+    if 'clear_chat' in st.query_params:
+        handle_clear_chat()
+        st.query_params.clear()
+    
+    # Title and header area with clear button
+    col1, col2 = st.columns([6,1])
+    with col1:
+        st.title("Chat Interface")
+    with col2:
+        if st.button("🗑️ Clear Chat", key="clear_chat", help="Clear chat history"):
+            handle_clear_chat()
     
     # Check AWS credentials
     if not check_aws_credentials():
         st.error("AWS credentials not properly configured.")
         st.stop()
     
-    # Handle clear history
-    if 'clear' in st.query_params:
-        clear_history()
-        st.session_state.chat_history = []
-        st.query_params.clear()
-        st.rerun()
-
-    # Load or initialize stores
+    # Load stores (but don't initialize new ones)
     index, all_items, query_embeddings_cache = load_or_initialize_stores()
-
-    # Initialize chat history in session state
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-
+    
     # Display chat history
     for message in st.session_state.chat_history:
         with st.chat_message("user"):
             st.write(message["question"])
         with st.chat_message("assistant"):
             st.write(message["answer"])
-
-    # Chat input
+    
+    # Chat input and processing
     if query := st.chat_input("Ask a question about your documents..."):
-        # Display user message
         with st.chat_message("user"):
             st.write(query)
-
-        # Generate and display assistant response
+        
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 if all_items:
@@ -147,12 +163,12 @@ def main():
                         k=5
                     )
                     
-                    # Get matched items without embeddings
+                    # Get matched items
                     matched_items = [{k: v for k, v in all_items[idx].items() if k != 'embedding'} 
                                    for idx in result.flatten()]
                     
-                    # Get response from Claude
-                    response = invoke_claude_3_multimodal(query, matched_items)
+                    # Generate and verify response
+                    response = generate_and_verify_response(query, matched_items)
                     st.write(response)
                     
                     # Update chat history
