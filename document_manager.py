@@ -19,7 +19,9 @@ def get_pdf_download_link(pdf_path):
     return f'data:application/pdf;base64,{b64_pdf}'
 
 def format_doc_name(filename):
-    """Format document name for display"""
+    """Format document name for display with UTF-8 support"""
+    # Ensure UTF-8 encoding for filename
+    filename = filename.encode('utf-8').decode('utf-8', errors='replace')
     # Remove file extension
     name = os.path.splitext(filename)[0]
     # Replace underscores with spaces

@@ -10,14 +10,22 @@ from rag_backend import (
     save_stores
 )
 import numpy as np
+import sys
+import codecs
 
-# Configure logging
+# Ensure UTF-8 encoding for stdout/stderr
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
+# Modify logging configuration:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('chatbot_validation.log'),
-        logging.StreamHandler()
+        logging.FileHandler('chatbot_validation.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -73,6 +81,11 @@ def main():
     st.set_page_config(layout="wide", page_title="Chat Interface")
     
     # Custom CSS for styling
+    st.markdown(
+        '<meta charset="UTF-8">',
+        unsafe_allow_html=True
+    )
+    
     st.markdown("""
         <style>
         .chat-message {

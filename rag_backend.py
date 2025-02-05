@@ -79,11 +79,11 @@ def process_tables(doc, page_num, items, filepath):
         logger.warning(f"Error processing table: {str(e)}")
 
 def process_text_chunks(text, text_splitter, page_num, items, filepath):
-    """Process text content from PDF pages"""
+    """Process text content from PDF pages with UTF-8 support"""
     chunks = text_splitter.split_text(text)
     for i, chunk in enumerate(chunks):
         text_file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_text_{page_num}_{i}.txt"
-        with open(text_file_name, 'w') as f:
+        with open(text_file_name, 'w', encoding='utf-8') as f:  # Add UTF-8 encoding
             f.write(chunk)
         items.append({"page": page_num, "type": "text", "text": chunk, "path": text_file_name})
 
@@ -180,13 +180,18 @@ def generate_multimodal_embeddings(prompt=None, image=None, output_embedding_len
         return None
 
 def load_or_initialize_stores():
-    """Load or initialize vector store and cache"""
+    """Load or initialize vector store and cache with UTF-8 support"""
     embedding_vector_dimension = 384
     
     if os.path.exists(os.path.join(VECTOR_STORE, FAISS_INDEX)):
         index = faiss.read_index(os.path.join(VECTOR_STORE, FAISS_INDEX))
         with open(os.path.join(VECTOR_STORE, ITEMS_PICKLE), 'rb') as f:
+            # Load with UTF-8 encoding handling
             all_items = pickle.load(f)
+            # Ensure all text content is UTF-8
+            for item in all_items:
+                if 'text' in item:
+                    item['text'] = item['text'].encode('utf-8').decode('utf-8', errors='replace')
     else:
         index = faiss.IndexFlatL2(embedding_vector_dimension)
         all_items = []
@@ -195,38 +200,64 @@ def load_or_initialize_stores():
     if os.path.exists(query_cache_path):
         with open(query_cache_path, 'rb') as f:
             query_embeddings_cache = pickle.load(f)
+            # Ensure queries are UTF-8 encoded
+            query_embeddings_cache = {
+                k.encode('utf-8').decode('utf-8', errors='replace'): v 
+                for k, v in query_embeddings_cache.items()
+            }
     else:
         query_embeddings_cache = {}
     
     return index, all_items, query_embeddings_cache
 
 def save_stores(index, all_items, query_embeddings_cache):
-    """Save vector store and cache"""
+    """Save vector store and cache with UTF-8 support"""
     os.makedirs(VECTOR_STORE, exist_ok=True)
     
     faiss.write_index(index, os.path.join(VECTOR_STORE, FAISS_INDEX))
+    
+    # Ensure UTF-8 encoding for text content before saving
+    items_to_save = []
+    for item in all_items:
+        item_copy = item.copy()
+        if 'text' in item_copy:
+            item_copy['text'] = item_copy['text'].encode('utf-8').decode('utf-8', errors='replace')
+        items_to_save.append(item_copy)
+    
     with open(os.path.join(VECTOR_STORE, ITEMS_PICKLE), 'wb') as f:
-        pickle.dump(all_items, f)
+        pickle.dump(items_to_save, f)
+    
+    # Ensure UTF-8 encoding for cache before saving
+    cache_to_save = {
+        k.encode('utf-8').decode('utf-8', errors='replace'): v 
+        for k, v in query_embeddings_cache.items()
+    }
     
     with open(os.path.join(VECTOR_STORE, QUERY_EMBEDDINGS_CACHE), 'wb') as f:
-        pickle.dump(query_embeddings_cache, f)
+        pickle.dump(cache_to_save, f)
 
 def invoke_claude_3_multimodal(prompt, matched_items):
-    """Generate response using Claude 3 with bold consolidated sources at the end"""
+    """Generate response using Claude 3 with strict document-only answers"""
     try:
+        # More restrictive system message
         system_msg = [{
-            "text": """You are a helpful assistant for question answering. Follow these rules strictly:
-                    1. Answer questions based ONLY on the provided context
-                    2. DO NOT include source citations inline in the text
-                    3. If using information from images/tables, mention it naturally in the text
-                    4. If you cannot find the answer in the context, say so clearly
-                    5. For images, describe relevant visual elements that support your answer
-                    6. Keep responses focused and concise while being thorough
-                    7. When presenting tables, use proper markdown table formatting
-                    8. At the end of your response, add a "References" section that lists all unique sources used
-                       Format: References\\n- **[Source: filename, page X]**"""
+            "text": """You are a document-focused question answering assistant. Follow these rules STRICTLY:
+                    1. Answer questions ONLY using information found in the provided document context
+                    2. If the answer cannot be found in the provided context, respond ONLY with: "I cannot answer this question based on the provided documents."
+                    3. Do not make assumptions or add information beyond what's in the documents
+                    4. Do not use any external knowledge
+                    5. When using information from images/tables, explicitly mention which document/image you're referencing
+                    6. Keep responses focused and precise, using only facts from the documents
+                    7. Use proper markdown formatting for any tables
+                    8. At the end, add a "References" section listing all sources used
+                       Format: References\\n- **[Source: filename, page X]**
+                    9. If only partial information is available, specify what aspects of the question you can and cannot answer based on the documents"""
         }]
         
+        # Check if we have any matched items
+        if not matched_items:
+            return "I cannot answer this question based on the provided documents."
+            
         message_content = []
         for item in matched_items:
             source_file = os.path.basename(item['path']).split('_')[0]
@@ -253,14 +284,14 @@ def invoke_claude_3_multimodal(prompt, matched_items):
 
         enhanced_prompt = f"""Question: {prompt}
 
-Please answer based on the provided context, following these requirements:
-1. Provide a clear, direct answer without inline citations
-2. If using information from images/tables, mention it naturally
-3. If the answer isn't in the context, say so
+Answer the question using ONLY the information provided in the context. Follow these requirements strictly:
+1. If you cannot find a complete answer in the provided context, state that clearly
+2. Do not add any information beyond what's in the documents
+3. When using information from images/tables, specify which document it's from
 4. Format the response in clear paragraphs with markdown
-5. Include relevant quotes when appropriate
-6. At the end, add a "References" section with all unique sources used in bold
-   Example format:
+5. Include relevant quotes from the documents when appropriate
+6. Add a "References" section at the end listing all sources used
+   Format:
    References
    - **[Source: filename, page X]**"""
 
