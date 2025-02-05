@@ -246,10 +246,10 @@ def invoke_claude_3_multimodal(prompt, matched_items):
                     2. If the answer cannot be found in the provided context, respond ONLY with: "I cannot answer this question based on the provided documents."
                     3. Do not make assumptions or add information beyond what's in the documents
                     4. Do not use any external knowledge
-                    5. When using information from images/tables, explicitly mention which document/image you're referencing
-                    6. Keep responses focused and precise, using only facts from the documents
-                    7. Use proper markdown formatting for any tables
-                    8. At the end, add a "References" section listing all sources used
+                    5. Keep responses focused and precise, using only facts from the documents
+                    6. Use proper markdown formatting for any tables
+                    7. NEVER include source citations within the response text
+                    8. Include only a single "References" section at the very end listing all sources used
                        Format: References\\n- **[Source: filename, page X]**
                     9. If only partial information is available, specify what aspects of the question you can and cannot answer based on the documents"""
         }]
@@ -287,10 +287,10 @@ def invoke_claude_3_multimodal(prompt, matched_items):
 Answer the question using ONLY the information provided in the context. Follow these requirements strictly:
 1. If you cannot find a complete answer in the provided context, state that clearly
 2. Do not add any information beyond what's in the documents
-3. When using information from images/tables, specify which document it's from
-4. Format the response in clear paragraphs with markdown
-5. Include relevant quotes from the documents when appropriate
-6. Add a "References" section at the end listing all sources used
+3. Format the response in clear paragraphs with markdown
+4. Include relevant quotes without source citations
+5. NEVER include any source citations within the text of your response
+6. Add ONLY ONE "References" section at the very end listing all sources used
    Format:
    References
    - **[Source: filename, page X]**"""
