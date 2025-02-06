@@ -13,3 +13,6 @@ jpype1
 requests
 numpy
 ipython
+langchain-openai
+python-dotenv
+pytorch

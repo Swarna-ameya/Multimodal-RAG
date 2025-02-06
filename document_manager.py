@@ -10,6 +10,20 @@ from rag_backend import (
     save_stores
 )
 import numpy as np
+import logging
+import sys
+
+
+# Add logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('document_manager.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def get_pdf_download_link(pdf_path):
     """Generate a download link for a PDF file"""
@@ -123,10 +137,6 @@ def show_document_list():
 def main():
     st.set_page_config(layout="wide", page_title="Document Manager")
     
-    if not check_aws_credentials():
-        st.error("AWS credentials not configured properly")
-        st.stop()
-    
     create_directories()
     
     # Document Management in Sidebar
@@ -159,16 +169,46 @@ def main():
                     st.success(f"Processed {uploaded_file.name}")
                     
                     with st.spinner("Generating embeddings..."):
+                        embeddings_list = []
+                        processed_items = []  # Keep track of successfully processed items
+                        
                         for item in items:
-                            if item['type'] in ['text', 'table']:
-                                item['embedding'] = generate_multimodal_embeddings(prompt=item['text'])
-                            else:
-                                item['embedding'] = generate_multimodal_embeddings(image=item['image'])
-                    
-                    new_embeddings = np.array([item['embedding'] for item in items])
-                    index.add(np.array(new_embeddings, dtype=np.float32))
-                    all_items.extend(items)
-                    save_stores(index, all_items, query_embeddings_cache)
+                            try:
+                                if item['type'] in ['text', 'table']:
+                                    embedding = generate_multimodal_embeddings(prompt=item['text'])
+                                else:
+                                    embedding = generate_multimodal_embeddings(image=item['image'])
+                                
+                                if embedding is not None:
+                                    item['embedding'] = embedding
+                                    embeddings_list.append(embedding)
+                                    processed_items.append(item)
+                                else:
+                                    logger.warning(f"Failed to generate embedding for item: {item['path']}")
+                                    continue
+                                    
+                            except Exception as e:
+                                logger.error(f"Error generating embedding for item {item['path']}: {str(e)}")
+                                continue
+                        
+                        if embeddings_list:
+                            try:
+                                # Convert embeddings to numpy array with proper shape
+                                embeddings_array = np.array(embeddings_list, dtype=np.float32)
+                                
+                                # Add embeddings to FAISS index
+                                index.add(embeddings_array)
+                                
+                                # Only extend all_items with successfully processed items
+                                all_items.extend(processed_items)
+                                save_stores(index, all_items, query_embeddings_cache)
+                                
+                                st.success(f"Added {len(embeddings_list)} embeddings to vector store")
+                                logger.info(f"Successfully added {len(embeddings_list)} embeddings to vector store")
+                                
+                            except Exception as e:
+                                logger.error(f"Error adding embeddings to index: {str(e)}")
+                                st.error("Failed to add embeddings to vector store")
     
     # Show document list and get selected document
     selected_file = show_document_list()

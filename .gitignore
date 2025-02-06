@@ -5,3 +5,4 @@ data/
 app.py
 chatbot_validation.log
 .env
+document_manager.log

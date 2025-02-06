@@ -1,18 +1,38 @@
-import boto3
+import logging
+import warnings
+
+# Configure root logger
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(levelname)s: %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)
+warnings.filterwarnings('ignore', category=Warning)
+
 import tabula
 import faiss
-import json
 import base64
 import fitz as pymupdf
 import os
-import logging
 import numpy as np
-import warnings
-from botocore.exceptions import ClientError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_aws import ChatBedrock
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
 import pickle
-import streamlit as st
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+import torch
+from transformers import CLIPProcessor, CLIPModel
+import io
+
+# Load environment variables
+load_dotenv()
 
 # Constants
 BASE_DIR = "data"
@@ -21,9 +41,25 @@ FAISS_INDEX = "faiss.index"
 ITEMS_PICKLE = "items.pkl"
 QUERY_EMBEDDINGS_CACHE = "query_embeddings.pkl"
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)
-warnings.filterwarnings("ignore")
+# Initialize embedding models (they will be loaded when first needed)
+embedding_models = {
+    'text_model': None,
+    'image_model': None,
+    'image_processor': None
+}
+
+def initialize_embedding_models():
+    """Initialize the embedding models if they haven't been loaded yet"""
+    if embedding_models['text_model'] is None:
+        embedding_models['text_model'] = SentenceTransformer('all-mpnet-base-v2')
+    
+    if embedding_models['image_model'] is None:
+        embedding_models['image_model'] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        embedding_models['image_processor'] = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        
+        # Move CLIP to GPU if available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        embedding_models['image_model'].to(device)
 
 def create_directories():
     """Create necessary directories for storing data"""
@@ -46,7 +82,7 @@ def process_tables(doc, page_num, items, filepath):
                 continue
                 
             # Clean table data
-            table = table.fillna('')  # Handle NaN values
+            table = table.fillna('')  
             
             # Create a more readable markdown table
             headers = table.columns.tolist()
@@ -149,46 +185,108 @@ def process_pdf(uploaded_file):
 
     return items, filepath
 
-def generate_multimodal_embeddings(prompt=None, image=None, output_embedding_length=384):
-    """Generate embeddings using AWS Bedrock"""
+def preprocess_image(image_pil):
+    """Preprocess image for CLIP"""
+    # Ensure image is in RGB mode
+    if image_pil.mode != 'RGB':
+        image_pil = image_pil.convert('RGB')
+    return image_pil
+
+def generate_multimodal_embeddings(prompt=None, image=None, output_embedding_length=768):
+    """Generate embeddings using open source models"""
     if not prompt and not image:
         raise ValueError("Please provide either a text prompt, base64 image, or both as input")
     
-    client = boto3.client(
-        service_name="bedrock-runtime",
-        region_name="us-east-1"
-    )
-    model_id = "amazon.titan-embed-image-v1"
-    
-    body = {"embeddingConfig": {"outputEmbeddingLength": output_embedding_length}}
-    if prompt:
-        body["inputText"] = prompt
-    if image:
-        body["inputImage"] = image
-
     try:
-        response = client.invoke_model(
-            modelId=model_id,
-            body=json.dumps(body),
-            accept="application/json",
-            contentType="application/json"
-        )
-        result = json.loads(response.get("body").read())
-        return result.get("embedding")
-    except ClientError as err:
-        logger.error(f"Error generating embeddings: {str(err)}")
+        # Initialize models if needed
+        initialize_embedding_models()
+        
+        if prompt and not image:
+            # Text-only embedding using Sentence-BERT
+            embedding = embedding_models['text_model'].encode(prompt, convert_to_numpy=True)
+            
+        elif image and not prompt:
+            try:
+                # Decode base64 image
+                image_bytes = base64.b64decode(image)
+                image_pil = Image.open(io.BytesIO(image_bytes))
+                
+                # Preprocess image
+                image_pil = preprocess_image(image_pil)
+                
+                # Process image for CLIP
+                device = next(embedding_models['image_model'].parameters()).device
+                inputs = embedding_models['image_processor'](
+                    images=image_pil, 
+                    return_tensors="pt",
+                    do_resize=True,
+                    size={"height": 224, "width": 224}
+                ).to(device)
+                
+                # Generate embedding
+                with torch.no_grad():
+                    embedding = embedding_models['image_model'].get_image_features(**inputs)
+                    embedding = embedding.cpu().numpy()[0]
+            except Exception as e:
+                logger.error(f"Error processing image: {str(e)}")
+                return None
+                
+        else:
+            # Combined text and image embedding
+            try:
+                text_embedding = embedding_models['text_model'].encode(prompt, convert_to_numpy=True)
+                
+                # Process image
+                image_bytes = base64.b64decode(image)
+                image_pil = Image.open(io.BytesIO(image_bytes))
+                image_pil = preprocess_image(image_pil)
+                
+                device = next(embedding_models['image_model'].parameters()).device
+                inputs = embedding_models['image_processor'](
+                    images=image_pil, 
+                    return_tensors="pt",
+                    do_resize=True,
+                    size={"height": 224, "width": 224}
+                ).to(device)
+                
+                with torch.no_grad():
+                    image_embedding = embedding_models['image_model'].get_image_features(**inputs)
+                    image_embedding = image_embedding.cpu().numpy()[0]
+                
+                # Average the embeddings
+                embedding = (text_embedding + image_embedding) / 2
+            except Exception as e:
+                logger.error(f"Error processing combined embedding: {str(e)}")
+                return None
+        
+        # Ensure embedding is the correct shape and type
+        embedding = np.asarray(embedding, dtype=np.float32)
+        if embedding.shape != (output_embedding_length,):
+            logger.warning(f"Unexpected embedding shape: {embedding.shape}")
+            return None
+        
+        # Normalize the embedding
+        embedding_norm = np.linalg.norm(embedding)
+        if embedding_norm > 0:
+            normalized_embedding = embedding / embedding_norm
+        else:
+            logger.warning("Zero norm embedding encountered")
+            return None
+        
+        return normalized_embedding
+        
+    except Exception as e:
+        logger.error(f"Error generating embeddings: {str(e)}")
         return None
 
 def load_or_initialize_stores():
-    """Load or initialize vector store and cache with UTF-8 support"""
-    embedding_vector_dimension = 384
+    """Load or initialize vector store and cache with updated embedding dimension"""
+    embedding_vector_dimension = 768  # New dimension for SBERT/CLIP embeddings
     
     if os.path.exists(os.path.join(VECTOR_STORE, FAISS_INDEX)):
         index = faiss.read_index(os.path.join(VECTOR_STORE, FAISS_INDEX))
         with open(os.path.join(VECTOR_STORE, ITEMS_PICKLE), 'rb') as f:
-            # Load with UTF-8 encoding handling
             all_items = pickle.load(f)
-            # Ensure all text content is UTF-8
             for item in all_items:
                 if 'text' in item:
                     item['text'] = item['text'].encode('utf-8').decode('utf-8', errors='replace')
@@ -200,7 +298,6 @@ def load_or_initialize_stores():
     if os.path.exists(query_cache_path):
         with open(query_cache_path, 'rb') as f:
             query_embeddings_cache = pickle.load(f)
-            # Ensure queries are UTF-8 encoded
             query_embeddings_cache = {
                 k.encode('utf-8').decode('utf-8', errors='replace'): v 
                 for k, v in query_embeddings_cache.items()
@@ -237,54 +334,89 @@ def save_stores(index, all_items, query_embeddings_cache):
         pickle.dump(cache_to_save, f)
 
 def invoke_claude_3_multimodal(prompt, matched_items):
-    """Generate response using Claude 3 with strict document-only answers"""
-    try:
-        # More restrictive system message
-        system_msg = [{
-            "text": """You are a document-focused question answering assistant. Follow these rules STRICTLY:
-                    1. Answer questions ONLY using information found in the provided document context
-                    2. If the answer cannot be found in the provided context, respond ONLY with: "I cannot answer this question based on the provided documents."
-                    3. Do not make assumptions or add information beyond what's in the documents
-                    4. Do not use any external knowledge
-                    5. Keep responses focused and precise, using only facts from the documents
-                    6. Use proper markdown formatting for any tables
-                    7. NEVER include source citations within the response text
-                    8. Include only a single "References" section at the very end listing all sources used
-                       Format: References\\n- **[Source: filename, page X]**
-                    9. If only partial information is available, specify what aspects of the question you can and cannot answer based on the documents"""
-        }]
+    """
+    Generate response using GPT-4 with strict document-only answers
+    
+    Args:
+        prompt (str): User's question or query
+        matched_items (list): List of relevant document chunks with their metadata
         
-        # Check if we have any matched items
+    Returns:
+        str: Generated response based on document context
+    """
+    try:
+        # Initialize OpenAI chat model with specific parameters
+        chat = ChatOpenAI(
+            model="gpt-4",
+            temperature=0.7,
+            max_tokens=1000,
+            top_p=0.9,
+            presence_penalty=0,
+            frequency_penalty=0
+        )
+        
+        # Comprehensive system message for strict document-based responses
+        system_msg = SystemMessage(content="""You are a document-focused question answering assistant. Follow these rules STRICTLY:
+                1. Answer questions ONLY using information found in the provided document context
+                2. If the answer cannot be found in the provided context, respond ONLY with: "I cannot answer this question based on the provided documents."
+                3. Do not make assumptions or add information beyond what's in the documents
+                4. Do not use any external knowledge
+                5. Keep responses focused and precise, using only facts from the documents
+                6. Use proper markdown formatting for any tables
+                7. NEVER include source citations within the response text
+                8. Include only a single "References" section at the very end listing all sources used
+                   Format: References\\n- **[Source: filename, page X]**
+                9. If only partial information is available, specify what aspects of the question you can and cannot answer based on the documents
+                10. For tables, maintain their structure using markdown table formatting
+                11. For numerical data, maintain precise values as shown in the documents
+                12. If documents contain conflicting information, acknowledge the discrepancy and cite all sources""")
+        
+        # Handle case with no matched items
         if not matched_items:
+            logger.info("No matching documents found for query: %s", prompt)
             return "I cannot answer this question based on the provided documents."
-            
-        message_content = []
+        
+        # Process and structure matched items
+        context_parts = []
+        image_references = []
+        table_contents = []
+        
         for item in matched_items:
-            source_file = os.path.basename(item['path']).split('_')[0]
-            source_info = f"[Source: {source_file}, page {item['page']+1}]"
-            
-            if item['type'] == 'text':
-                message_content.append({
-                    "text": f"Text content: {item['text']}\n{source_info}"
-                })
-            elif item['type'] == 'table':
-                message_content.append({
-                    "text": f"Table content: {item['text']}\n{source_info}"
-                })
-            elif item['type'] in ['image', 'page']:
-                message_content.append({
-                    "image": {
-                        "format": "png",
-                        "source": {"bytes": item['image']},
-                    }
-                })
-                message_content.append({
-                    "text": f"[Image reference: {source_info}]"
-                })
-
+            try:
+                source_file = os.path.basename(item['path']).split('_')[0]
+                source_info = f"[Source: {source_file}, page {item['page']+1}]"
+                
+                if item['type'] == 'text':
+                    # Process text content with UTF-8 encoding
+                    text_content = item['text'].encode('utf-8').decode('utf-8', errors='replace')
+                    context_parts.append(f"Text content: {text_content}\n{source_info}")
+                    
+                elif item['type'] == 'table':
+                    # Handle table content separately to maintain structure
+                    table_contents.append(f"Table content:\n{item['text']}\n{source_info}")
+                    
+                elif item['type'] in ['image', 'page']:
+                    # Keep track of image references
+                    image_references.append(f"[Image reference: {source_info}]")
+                    
+            except Exception as e:
+                logger.error(f"Error processing item {item.get('path', 'unknown')}: {str(e)}")
+                continue
+        
+        # Combine all context parts with proper separation
+        full_context = "\n\n".join([
+            *context_parts,
+            *table_contents,
+            *image_references
+        ])
+        
+        # Construct enhanced prompt with comprehensive instructions
         enhanced_prompt = f"""Question: {prompt}
 
-Answer the question using ONLY the information provided in the context. Follow these requirements strictly:
+Context:
+{full_context}
+
+Answer the question using ONLY the information provided in the context above. Follow these requirements strictly:
 1. If you cannot find a complete answer in the provided context, state that clearly
 2. Do not add any information beyond what's in the documents
 3. Format the response in clear paragraphs with markdown
@@ -293,36 +425,49 @@ Answer the question using ONLY the information provided in the context. Follow t
 6. Add ONLY ONE "References" section at the very end listing all sources used
    Format:
    References
-   - **[Source: filename, page X]**"""
+   - **[Source: filename, page X]**
+7. For tables, maintain the exact structure and data
+8. For numerical values, use exact figures from the documents
+9. If you find conflicting information, acknowledge it and cite all relevant sources"""
 
-        inference_params = {
-            "max_new_tokens": 1000,
-            "top_p": 0.9,
-            "top_k": 20,
-            "temperature": 0.7,
-            "stop_sequences": []
-        }
-        
-        message_list = [
-            {"role": "user", "content": message_content},
-            {"role": "user", "content": [{"text": enhanced_prompt}]}
+        # Create message list for the chat model
+        messages = [
+            system_msg,
+            HumanMessage(content=enhanced_prompt)
         ]
         
-        request_body = {
-            "messages": message_list,
-            "system": system_msg,
-            "inferenceConfig": inference_params,
-        }
+        # Log the request (excluding sensitive content)
+        logger.info(f"Sending request to GPT-4 for query: {prompt[:100]}...")
         
-        model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
-        client = ChatBedrock(model_id=model_id)
-        
-        response = client.invoke(json.dumps(request_body))
-        return response.content
+        # Get response from OpenAI with timeout handling
+        try:
+            response = chat.invoke(messages)
+            
+            # Log successful response (length only)
+            logger.info(f"Received response of length: {len(response.content)}")
+            
+            # Post-process response to ensure proper formatting
+            processed_response = response.content.strip()
+            
+            # Ensure response ends with References section if sources were used
+            if any(source_info in processed_response for item in matched_items 
+                  for source_info in [os.path.basename(item['path']).split('_')[0]]):
+                if "References" not in processed_response:
+                    processed_response += "\n\nReferences\n"
+                    for item in matched_items:
+                        source_file = os.path.basename(item['path']).split('_')[0]
+                        processed_response += f"- **[Source: {source_file}, page {item['page']+1}]**\n"
+            
+            return processed_response
+            
+        except Exception as e:
+            logger.error(f"Error during GPT-4 API call: {str(e)}")
+            return (f"### Error\nAn error occurred while generating the response: {str(e)}\n\n"
+                   "Please try again or contact support if the problem persists.")
         
     except Exception as e:
-        logger.error(f"Error invoking Claude-3: {str(e)}")
-        return f"### Error\n{str(e)}\n\nPlease try again or contact support if the problem persists."
+        logger.error(f"Fatal error in invoke_claude_3_multimodal: {str(e)}")
+        return "### Error\nA critical error occurred. Please try again later or contact support."
 
 def clear_vector_store():
     """Clear all stored vectors and caches"""
@@ -342,13 +487,5 @@ def clear_history():
         logger.error(f"Error clearing history: {str(e)}")
 
 def check_aws_credentials():
-    """Verify AWS credentials are properly configured"""
-    try:
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        if not credentials:
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"AWS configuration error: {str(e)}")
-        return False
+    """This function is kept for compatibility but always returns True now"""
+    return True

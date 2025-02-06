@@ -1,6 +1,20 @@
-import os
-import streamlit as st
+import warnings
 import logging
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(levelname)s: %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
+# Create logger
+logger = logging.getLogger(__name__)
+
+# Suppress torch warnings properly
+warnings.filterwarnings('ignore', category=Warning)
+
+import streamlit as st
 from response_verifier import verify_response
 from rag_backend import (
     check_aws_credentials,
@@ -13,22 +27,12 @@ import numpy as np
 import sys
 import codecs
 
+
 # Ensure UTF-8 encoding for stdout/stderr
 if sys.stdout.encoding != 'utf-8':
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
 if sys.stderr.encoding != 'utf-8':
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
-
-# Modify logging configuration:
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('chatbot_validation.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
 
 def initialize_session_state():
     """Initialize session state variables"""
