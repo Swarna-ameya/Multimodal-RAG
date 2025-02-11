@@ -6,13 +6,12 @@ import base64
 import fitz as pymupdf
 import os
 import logging
-import numpy as np
 import warnings
 from botocore.exceptions import ClientError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_aws import ChatBedrock
 import pickle
-import streamlit as st
+
 
 # Constants
 BASE_DIR = "data"
@@ -76,14 +75,14 @@ def process_tables(doc, page_num, items, filepath):
                 "raw_table": table.to_dict('records')
             })
     except Exception as e:
-        logger.warning(f"Error processing table: {str(e)}")
+        logger.warning(f"Table processing error on page {page_num + 1}: {str(e)}")
 
 def process_text_chunks(text, text_splitter, page_num, items, filepath):
     """Process text content from PDF pages with UTF-8 support"""
     chunks = text_splitter.split_text(text)
     for i, chunk in enumerate(chunks):
         text_file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_text_{page_num}_{i}.txt"
-        with open(text_file_name, 'w', encoding='utf-8') as f:  # Add UTF-8 encoding
+        with open(text_file_name, 'w', encoding='utf-8') as f: 
             f.write(chunk)
         items.append({"page": page_num, "type": "text", "text": chunk, "path": text_file_name})
 
@@ -114,7 +113,7 @@ def process_images(page, page_num, items, filepath, doc):
                 "image": encoded_image
             })
         except Exception as e:
-            logger.error(f"Error processing image: {str(e)}")
+            logger.warning(f"Image processing error on page {page_num + 1}, image {idx}: {str(e)}")
             continue
 
 def process_page_images(page, page_num, items, filepath):
@@ -299,7 +298,7 @@ Answer the question using ONLY the information provided in the context. Follow t
             "max_new_tokens": 1000,
             "top_p": 0.9,
             "top_k": 20,
-            "temperature": 0.7,
+            "temperature": 0.2,
             "stop_sequences": []
         }
         

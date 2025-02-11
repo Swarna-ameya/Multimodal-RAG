@@ -21,7 +21,7 @@ if sys.stderr.encoding != 'utf-8':
 
 # Modify logging configuration:
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('chatbot_validation.log', encoding='utf-8'),
@@ -41,39 +41,31 @@ def handle_clear_chat():
     st.rerun()
 
 def generate_and_verify_response(query, matched_items):
-    """Generate response and verify its quality, logging verification details"""
     max_attempts = 3
     attempt = 0
     
     while attempt < max_attempts:
-        # Generate initial response
         response = invoke_claude_3_multimodal(query, matched_items)
-        
-        # Verify response quality
         is_valid, feedback = verify_response(response, matched_items, query)
         
-        # Log verification results
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Response Verification - Attempt {attempt + 1}/{max_attempts}")
-        logger.info(f"Query: {query}")
-        logger.info(f"Validation Result: {'PASSED' if is_valid else 'FAILED'}")
+        # Only log failed validations
         if not is_valid:
-            logger.info("Feedback for improvement:")
+            logger.warning(f"\n{'='*50}")
+            logger.warning(f"Response Validation Failed - Attempt {attempt + 1}/{max_attempts}")
+            logger.warning(f"Query: {query}")
+            logger.warning("Feedback for improvement:")
             for point in feedback:
-                logger.info(f"- {point}")
-        logger.info(f"{'='*50}\n")
+                logger.warning(f"- {point}")
+            logger.warning(f"{'='*50}\n")
         
         if is_valid:
             return response
         
-        # If invalid, regenerate with feedback
         attempt += 1
         if attempt < max_attempts:
-            # Add feedback to the prompt for improvement but don't show in chat
             enhanced_query = f"{query}\n\nImprove the response considering: {'; '.join(feedback)}"
             query = enhanced_query
     
-    # If all attempts failed, log warning but return best effort response
     logger.warning("Maximum verification attempts reached. Returning best effort response.")
     return response
 

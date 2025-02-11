@@ -4,4 +4,5 @@ __pycache__
 data/
 app.py
 chatbot_validation.log
+document_manager.log
 .env
