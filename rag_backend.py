@@ -348,7 +348,7 @@ def invoke_claude_3_multimodal(prompt, matched_items):
         # Initialize OpenAI chat model with specific parameters
         chat = ChatOpenAI(
             model="gpt-4",
-            temperature=0.7,
+            temperature=0.2,
             max_tokens=1000,
             top_p=0.9,
             presence_penalty=0,
