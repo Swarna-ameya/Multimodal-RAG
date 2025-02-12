@@ -67,10 +67,10 @@ aws configure
 ### start document manager (terminal-1)
 Upload files and preview document
 ```bash
-streamlit run document_manager.py
+streamlit run document_manager.py --server.fileWatcherType none
 ```
 
 ### start the chat interface (terminal-2)
 ```bash
-streamlit run chat_interface.py
+streamlit run chat_interface.py --server.fileWatcherType none
 ```
