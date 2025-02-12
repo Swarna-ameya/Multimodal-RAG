@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_aws import ChatBedrock
 import pickle
-
+import re
 
 # Constants
 BASE_DIR = "data"
@@ -78,13 +78,126 @@ def process_tables(doc, page_num, items, filepath):
         logger.warning(f"Table processing error on page {page_num + 1}: {str(e)}")
 
 def process_text_chunks(text, text_splitter, page_num, items, filepath):
-    """Process text content from PDF pages with UTF-8 support"""
-    chunks = text_splitter.split_text(text)
-    for i, chunk in enumerate(chunks):
-        text_file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_text_{page_num}_{i}.txt"
-        with open(text_file_name, 'w', encoding='utf-8') as f: 
-            f.write(chunk)
-        items.append({"page": page_num, "type": "text", "text": chunk, "path": text_file_name})
+    """Enhanced text processing with better structure preservation"""
+    import re
+    
+    # Document structure patterns
+    patterns = {
+        'heading': re.compile(r'^(?:#{1,6}|\d+\.|[A-Z][^.]+:)\s*(.+)$', re.MULTILINE),
+        'bullet_list': re.compile(r'^\s*[-*•]\s+(.+)$', re.MULTILINE),
+        'numbered_list': re.compile(r'^\s*\d+\.\s+(.+)$', re.MULTILINE),
+        'code_block': re.compile(r'```[\s\S]*?```', re.MULTILINE),
+        'table': re.compile(r'^\s*\|(?:[^|]+\|)+\s*$', re.MULTILINE)
+    }
+    
+    def extract_structure(text_block):
+        """Extract structural elements while preserving their exact format"""
+        elements = []
+        current_element = {'type': 'text', 'content': []}
+        lines = text_block.split('\n')
+        code_block = False
+        
+        for line in lines:
+            # Handle code blocks
+            if line.startswith('```'):
+                if code_block:
+                    current_element['content'].append(line)
+                    elements.append(current_element)
+                    current_element = {'type': 'text', 'content': []}
+                    code_block = False
+                else:
+                    if current_element['content']:
+                        elements.append(current_element)
+                    current_element = {'type': 'code', 'content': [line]}
+                    code_block = True
+                continue
+                
+            if code_block:
+                current_element['content'].append(line)
+                continue
+                
+            # Check for structural elements
+            for elem_type, pattern in patterns.items():
+                if pattern.match(line):
+                    if current_element['content']:
+                        elements.append(current_element)
+                    current_element = {'type': elem_type, 'content': [line]}
+                    break
+            else:
+                if line.strip():
+                    current_element['content'].append(line)
+                elif current_element['content']:
+                    elements.append(current_element)
+                    current_element = {'type': 'text', 'content': []}
+        
+        if current_element['content']:
+            elements.append(current_element)
+            
+        return elements
+    
+    def save_element(element, section_num):
+        """Save a structural element while preserving its format"""
+        content = '\n'.join(element['content'])
+        file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_{element['type']}_{page_num}_{section_num}.txt"
+        
+        with open(file_name, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        metadata = {
+            'type': element['type'],
+            'has_code': element['type'] == 'code',
+            'has_list': element['type'] in ['bullet_list', 'numbered_list'],
+            'has_table': element['type'] == 'table',
+            'is_heading': element['type'] == 'heading'
+        }
+        
+        return {
+            "page": page_num,
+            "type": "text",
+            "text": content,
+            "path": file_name,
+            "metadata": metadata
+        }
+    
+    try:
+        # First extract structural elements
+        elements = extract_structure(text)
+        
+        # Save elements while preserving their structure
+        for i, element in enumerate(elements):
+            item = save_element(element, i)
+            items.append(item)
+        
+        # Process any remaining text traditionally
+        remaining_text = text_splitter.split_text(text)
+        for i, chunk in enumerate(remaining_text):
+            # Only save chunks that aren't part of structural elements
+            if not any(chunk in elem['content'] for elem in elements):
+                text_file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_text_{page_num}_{i}.txt"
+                with open(text_file_name, 'w', encoding='utf-8') as f:
+                    f.write(chunk)
+                items.append({
+                    "page": page_num,
+                    "type": "text",
+                    "text": chunk,
+                    "path": text_file_name,
+                    "metadata": {'type': 'text'}
+                })
+                
+    except Exception as e:
+        logger.error(f"Error processing text chunks on page {page_num}: {str(e)}")
+        # Fall back to basic processing
+        chunks = text_splitter.split_text(text)
+        for i, chunk in enumerate(chunks):
+            text_file_name = f"{BASE_DIR}/text/{os.path.basename(filepath)}_text_{page_num}_{i}.txt"
+            with open(text_file_name, 'w', encoding='utf-8') as f:
+                f.write(chunk)
+            items.append({
+                "page": page_num,
+                "type": "text",
+                "text": chunk,
+                "path": text_file_name
+            })
 
 def process_images(page, page_num, items, filepath, doc):
     """Process images from PDF pages"""
@@ -238,67 +351,163 @@ def save_stores(index, all_items, query_embeddings_cache):
 def invoke_claude_3_multimodal(prompt, matched_items):
     """Generate response using Claude 3 with strict document-only answers"""
     try:
-        # More restrictive system message
         system_msg = [{
-            "text": """You are a document-focused question answering assistant. Follow these rules STRICTLY:
-                    1. Answer questions ONLY using information found in the provided document context
-                    2. If the answer cannot be found in the provided context, respond ONLY with: "I cannot answer this question based on the provided documents."
-                    3. Do not make assumptions or add information beyond what's in the documents
-                    4. Do not use any external knowledge
-                    5. Keep responses focused and precise, using only facts from the documents
-                    6. Use proper markdown formatting for any tables
-                    7. NEVER include source citations within the response text
-                    8. Include only a single "References" section at the very end listing all sources used
-                       Format: References\\n- **[Source: filename, page X]**
-                    9. If only partial information is available, specify what aspects of the question you can and cannot answer based on the documents"""
+            "text": """You are a specialized documentation assistant that ONLY answers using the EXACT content from provided documents. Follow these rules with NO EXCEPTIONS:
+
+1. Document Content:
+   - ONLY use information explicitly present in the provided documents
+   - DO NOT add any external information or knowledge
+   - DO NOT make assumptions or generalizations
+   - If information is not in the documents, clearly state that
+   - Copy relevant text exactly as it appears in the documents
+
+2. Document Structure:
+   - Preserve ALL original formatting
+   - Keep headings with their exact numbering and levels
+   - Maintain bullet points and list numbering exactly
+   - Preserve table formatting in markdown
+   - Keep code blocks with their syntax and indentation
+
+3. Response Structure:
+   - Start with the most relevant section heading from the document
+   - Quote the exact text under that heading
+   - Use clear section breaks between different parts
+   - Start lists and code blocks on new lines
+   - Maintain original paragraph breaks
+
+4. When Information is Missing:
+   - State clearly: "I cannot find information about [specific topic] in the provided documents"
+   - Do not speculate or suggest possibilities
+   - Do not add qualifiers like "may", "might", or "probably"
+   - Do not reference external sources
+
+5. Technical Content:
+   - Keep exact command syntax and parameters
+   - Preserve all code formatting and comments
+   - Maintain exact error messages and outputs
+   - Keep file paths and configuration exactly as shown
+
+6. References:
+   - End with a "References" section
+   - Format: "- **[Source: filename, page X]**"
+   - Never cite sources inline in the text
+   - List all documents used in the response
+
+7. Formatting Rules:
+   - Code blocks: Use ```language_name and ``` 
+   - Lists: Keep original markers (-, *, numbers)
+   - Tables: Preserve | and - formatting
+   - Quotes: Use exact text inside quotation marks
+
+8. Absolutely Forbidden:
+   - Adding any information not in documents
+   - Modifying code examples
+   - Changing technical parameters
+   - Paraphrasing technical instructions
+   - Making assumptions about missing information
+   - Using speculative language
+   - Combining information in ways that alter meaning"""
         }]
         
-        # Check if we have any matched items
         if not matched_items:
-            return "I cannot answer this question based on the provided documents."
+            return "I cannot find any information about this topic in the provided documents."
             
-        message_content = []
+        # Organize matched items by section and relevance
+        organized_content = []
         for item in matched_items:
             source_file = os.path.basename(item['path']).split('_')[0]
             source_info = f"[Source: {source_file}, page {item['page']+1}]"
             
+            content_entry = {
+                "source": source_info,
+                "type": item['type']
+            }
+            
             if item['type'] == 'text':
-                message_content.append({
-                    "text": f"Text content: {item['text']}\n{source_info}"
-                })
+                # Preserve section structure if present
+                lines = item['text'].split('\n')
+                heading_match = re.match(r'^(#+|\d+\.|\w+:)\s+(.+)$', lines[0]) if lines else None
+                
+                if heading_match:
+                    content_entry["section"] = heading_match.group(2)
+                    content_entry["heading_level"] = len(heading_match.group(1)) if '#' in heading_match.group(1) else 1
+                    content_entry["text"] = '\n'.join(lines[1:])
+                else:
+                    content_entry["text"] = item['text']
+                    
+                # Check for special formatting
+                content_entry["has_lists"] = any(line.strip().startswith(('- ', '* ', '• ', '1. ')) for line in lines)
+                content_entry["has_code"] = bool(re.search(r'```[\s\S]*?```', item['text']))
+                content_entry["has_tables"] = bool(re.search(r'\|(?:[^|]+\|)+', item['text']))
+                
+                organized_content.append(content_entry)
+                
             elif item['type'] == 'table':
-                message_content.append({
-                    "text": f"Table content: {item['text']}\n{source_info}"
-                })
+                content_entry["text"] = item['text']
+                organized_content.append(content_entry)
+                
             elif item['type'] in ['image', 'page']:
+                content_entry["image"] = {
+                    "format": "png",
+                    "source": {"bytes": item['image']}
+                }
+                organized_content.append(content_entry)
+
+        # Build message content preserving structure
+        message_content = []
+        
+        # Group by sections
+        sections = {}
+        for content in organized_content:
+            if 'section' in content:
+                section_name = content['section']
+                if section_name not in sections:
+                    sections[section_name] = []
+                sections[section_name].append(content)
+            else:
+                if 'General' not in sections:
+                    sections['General'] = []
+                sections['General'].append(content)
+
+        # Add content by section
+        for section_name, contents in sections.items():
+            # Add section header
+            if section_name != 'General':
                 message_content.append({
-                    "image": {
-                        "format": "png",
-                        "source": {"bytes": item['image']},
-                    }
+                    "text": f"# {section_name}\n"
                 })
-                message_content.append({
-                    "text": f"[Image reference: {source_info}]"
-                })
+            
+            # Add section contents preserving format
+            for content in contents:
+                if 'text' in content:
+                    # Preserve special formatting
+                    text_with_format = content['text']
+                    if content.get('has_code') or content.get('has_lists') or content.get('has_tables'):
+                        text_with_format = '\n' + text_with_format + '\n'
+                    
+                    message_content.append({
+                        "text": f"{text_with_format}\n{content['source']}"
+                    })
+                elif 'image' in content:
+                    message_content.append({"image": content["image"]})
+                    message_content.append({"text": f"[Image: {content['source']}]"})
 
         enhanced_prompt = f"""Question: {prompt}
 
-Answer the question using ONLY the information provided in the context. Follow these requirements strictly:
-1. If you cannot find a complete answer in the provided context, state that clearly
-2. Do not add any information beyond what's in the documents
-3. Format the response in clear paragraphs with markdown
-4. Include relevant quotes without source citations
-5. NEVER include any source citations within the text of your response
-6. Add ONLY ONE "References" section at the very end listing all sources used
-   Format:
-   References
-   - **[Source: filename, page X]**"""
+Requirements for your response:
+1. Use ONLY information from the provided documents
+2. Use EXACT quotes and preserve ALL formatting
+3. If information is missing, state that clearly
+4. NEVER add external information or assumptions
+5. Keep ALL original structure (lists, code blocks, tables)
+
+Available sections: {', '.join(sections.keys())}"""
 
         inference_params = {
             "max_new_tokens": 1000,
             "top_p": 0.9,
             "top_k": 20,
-            "temperature": 0.2,
+            "temperature": 0.1,  # Very low temperature for deterministic responses
             "stop_sequences": []
         }
         
