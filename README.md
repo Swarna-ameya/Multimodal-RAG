@@ -29,7 +29,7 @@ This project comprises two key Streamlit applications:
 ### Installation
 1. Clone this repository:
    ```bash
-   git clone <repository_url>
+   git clone https://github.com/swarnavarsha1/Multimodal-RAG.git
    cd <repository_name>
 
 
