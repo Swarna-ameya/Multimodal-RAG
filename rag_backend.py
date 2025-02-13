@@ -349,171 +349,181 @@ def save_stores(index, all_items, query_embeddings_cache):
         pickle.dump(cache_to_save, f)
 
 def invoke_claude_3_multimodal(prompt, matched_items):
-    """Generate response using Claude 3 with strict document-only answers"""
+    """Generate response using Claude 3 with integrated natural interaction and document accuracy"""
     try:
         system_msg = [{
-            "text": """You are a specialized documentation assistant that ONLY answers using the EXACT content from provided documents. Follow these rules with NO EXCEPTIONS:
+            "text": """You are a helpful and intelligent assistant that combines natural conversation with strict document accuracy. Follow these guidelines:
 
-1. Document Content:
-   - ONLY use information explicitly present in the provided documents
-   - DO NOT add any external information or knowledge
-   - DO NOT make assumptions or generalizations
-   - If information is not in the documents, clearly state that
-   - Copy relevant text exactly as it appears in the documents
+1. Natural & Intelligent Interaction:
+   - Be conversational and engaging like Claude/ChatGPT
+   - Understand user intent and context deeply
+   - Explain complex information clearly
+   - Break down difficult concepts
+   - Connect related information naturally
+   - Adapt tone to match the conversation
+   - Use examples from documents when helpful
+   - Avoid template phrases like "Sure, let me explain"
+   - Present numbers and prices clearly (e.g., "$6.95" not split up)
 
-2. Document Structure:
-   - Preserve ALL original formatting
-   - Keep headings with their exact numbering and levels
-   - Maintain bullet points and list numbering exactly
-   - Preserve table formatting in markdown
-   - Keep code blocks with their syntax and indentation
+2. Document Accuracy:
+   - Use ONLY information from provided documents
+   - Never add external knowledge or assumptions
+   - If information isn't available, clearly say so
+   - For partial information, explain what's available and what's missing
+   - Keep all facts and details exactly as documented
 
-3. Response Structure:
-   - Start with the most relevant section heading from the document
-   - Quote the exact text under that heading
-   - Use clear section breaks between different parts
-   - Start lists and code blocks on new lines
-   - Maintain original paragraph breaks
+3. Dynamic Content Handling:
+   - Let each document's structure guide preservation
+   - Maintain any intentional formatting
+   - Keep specialized notation as presented
+   - Preserve meaningful organization
+   - Respect document hierarchies
+   - Keep original presentation when it matters for understanding
 
-4. When Information is Missing:
-   - State clearly: "I cannot find information about [specific topic] in the provided documents"
-   - Do not speculate or suggest possibilities
-   - Do not add qualifiers like "may", "might", or "probably"
-   - Do not reference external sources
+4. Response Quality:
+   - Combine conversational tone with precision
+   - Structure information logically
+   - Make complex topics accessible
+   - Include relevant context
+   - Present information clearly
+   - Maintain natural flow
+   - Write in clear paragraphs
+   - Use lists only when they improve understanding
 
-5. Technical Content:
-   - Keep exact command syntax and parameters
-   - Preserve all code formatting and comments
-   - Maintain exact error messages and outputs
-   - Keep file paths and configuration exactly as shown
+5. References:
+   - End with "**References:**"
+   - List each source on a new line with hyphen
+   - Format: "- [Source: filename, page X]"
+   - Sort by page number
+   - No duplicates
+   - Only include used sources
 
-6. References:
-   - End with a "References" section
-   - Format: "- **[Source: filename, page X]**"
-   - Never cite sources inline in the text
-   - List all documents used in the response
+6. Strict Document Adherence:
+   - ZERO hallucination - never generate information not in documents
+   - NEVER use knowledge from external sources
+   - If no information exists in documents, respond ONLY with: "I don't have any information about that in the provided documents"
+   - Don't explain what other information is available instead
+   - Don't mention what the documents are about
+   - Don't make suggestions or offer alternatives
+   - Don't add references when saying you don't have information
+   - Every statement must be traceable to document content
+   - Even when explaining simply, use only document information
 
-7. Formatting Rules:
-   - Code blocks: Use ```language_name and ``` 
-   - Lists: Keep original markers (-, *, numbers)
-   - Tables: Preserve | and - formatting
-   - Quotes: Use exact text inside quotation marks
-
-8. Absolutely Forbidden:
-   - Adding any information not in documents
-   - Modifying code examples
-   - Changing technical parameters
-   - Paraphrasing technical instructions
-   - Making assumptions about missing information
-   - Using speculative language
-   - Combining information in ways that alter meaning"""
+Remember: Be as engaging as Claude/ChatGPT while ensuring every piece of information comes from the documents."""
         }]
         
         if not matched_items:
-            return "I cannot find any information about this topic in the provided documents."
+            return "I don't have any information about that in the provided documents."
             
-        # Organize matched items by section and relevance
+        # Organize matched items with improved content handling
         organized_content = []
+        seen_sources = set()  # Track unique sources
+        
         for item in matched_items:
             source_file = os.path.basename(item['path']).split('_')[0]
-            source_info = f"[Source: {source_file}, page {item['page']+1}]"
+            page_num = item['page'] + 1
+            source_info = f"[Source: {source_file}, page {page_num}]"
+            
+            # Skip duplicate sources
+            source_key = (source_file, page_num)
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
             
             content_entry = {
                 "source": source_info,
-                "type": item['type']
+                "type": item['type'],
+                "origin": {"file": source_file, "page": page_num},
+                "raw_text": item.get('text', '')  # Store original text for reference checking
             }
             
             if item['type'] == 'text':
-                # Preserve section structure if present
-                lines = item['text'].split('\n')
-                heading_match = re.match(r'^(#+|\d+\.|\w+:)\s+(.+)$', lines[0]) if lines else None
+                text = item['text']
                 
-                if heading_match:
-                    content_entry["section"] = heading_match.group(2)
-                    content_entry["heading_level"] = len(heading_match.group(1)) if '#' in heading_match.group(1) else 1
-                    content_entry["text"] = '\n'.join(lines[1:])
-                else:
-                    content_entry["text"] = item['text']
-                    
-                # Check for special formatting
-                content_entry["has_lists"] = any(line.strip().startswith(('- ', '* ', '• ', '1. ')) for line in lines)
-                content_entry["has_code"] = bool(re.search(r'```[\s\S]*?```', item['text']))
-                content_entry["has_tables"] = bool(re.search(r'\|(?:[^|]+\|)+', item['text']))
+                # Clean up number and price formatting
+                text = re.sub(r'(\$\d+\.?\d*)\s+', r'\1 ', text)  # Fix price spacing
+                text = re.sub(r'(\d+\.?\d*)\s+', r'\1 ', text)  # Fix number spacing
                 
-                organized_content.append(content_entry)
+                # Track structural elements without making assumptions
+                content_entry.update({
+                    "text": text,
+                    "structure": {
+                        "has_special_formatting": bool(re.search(r'```|`.*?`|\|.*\||\$|^[\s-]*>|^\s*[-*+]\s|\d+\.\s', text, re.M)),
+                        "has_sections": bool(re.search(r'^#+\s|\n#+\s', text, re.M)),
+                        "has_lists": bool(re.search(r'^\s*[-*+]\s|\d+\.\s', text, re.M)),
+                        "has_indentation": bool(re.search(r'^\s{2,}', text, re.M)),
+                        "has_whitespace_significance": bool(re.search(r'\n\s*\n', text))
+                    },
+                    "content_length": len(text.split())
+                })
                 
             elif item['type'] == 'table':
-                content_entry["text"] = item['text']
-                organized_content.append(content_entry)
+                content_entry.update({
+                    "text": item['text'],
+                    "structure": {"is_table": True}
+                })
                 
             elif item['type'] in ['image', 'page']:
                 content_entry["image"] = {
                     "format": "png",
                     "source": {"bytes": item['image']}
                 }
-                organized_content.append(content_entry)
+            
+            organized_content.append(content_entry)
 
-        # Build message content preserving structure
+        # Check for relevant content
+        relevant_content = [c for c in organized_content 
+                          if c.get('text') and any(term.lower() in c.get('text', '').lower() 
+                          for term in prompt.lower().split())]
+        
+        if not relevant_content:
+            return "I don't have any information about that in the provided documents."
+
+        # Build message content with intelligent handling
         message_content = []
         
-        # Group by sections
-        sections = {}
+        # Add query context for better understanding
+        query_context = f"""Question: {prompt}
+
+Analysis:
+- Content sections found: {len(relevant_content)}
+- Documents referenced: {len(set(c['origin']['file'] for c in relevant_content))}
+
+Response Requirements:
+1. Use ONLY information from these document sections
+2. Preserve formatting where it matters for understanding
+3. Be conversational when explaining concepts
+4. Include all relevant details exactly as documented
+5. End with complete source references
+6. State clearly if any requested information is missing"""
+
+        # Add content with structure preservation
         for content in organized_content:
-            if 'section' in content:
-                section_name = content['section']
-                if section_name not in sections:
-                    sections[section_name] = []
-                sections[section_name].append(content)
-            else:
-                if 'General' not in sections:
-                    sections['General'] = []
-                sections['General'].append(content)
-
-        # Add content by section
-        for section_name, contents in sections.items():
-            # Add section header
-            if section_name != 'General':
+            if content.get('text'):
+                structural_notes = ""
+                if content.get('structure'):
+                    if any(content['structure'].values()):
+                        structural_notes = "\n[Preserve original formatting below]\n"
+                
                 message_content.append({
-                    "text": f"# {section_name}\n"
+                    "text": f"{structural_notes}{content['text']}\n{content['source']}"
                 })
-            
-            # Add section contents preserving format
-            for content in contents:
-                if 'text' in content:
-                    # Preserve special formatting
-                    text_with_format = content['text']
-                    if content.get('has_code') or content.get('has_lists') or content.get('has_tables'):
-                        text_with_format = '\n' + text_with_format + '\n'
-                    
-                    message_content.append({
-                        "text": f"{text_with_format}\n{content['source']}"
-                    })
-                elif 'image' in content:
-                    message_content.append({"image": content["image"]})
-                    message_content.append({"text": f"[Image: {content['source']}]"})
+            elif content.get('image'):
+                message_content.append({"image": content["image"]})
+                message_content.append({"text": f"[Image: {content['source']}]"})
 
-        enhanced_prompt = f"""Question: {prompt}
-
-Requirements for your response:
-1. Use ONLY information from the provided documents
-2. Use EXACT quotes and preserve ALL formatting
-3. If information is missing, state that clearly
-4. NEVER add external information or assumptions
-5. Keep ALL original structure (lists, code blocks, tables)
-
-Available sections: {', '.join(sections.keys())}"""
-
+        # Set inference parameters
         inference_params = {
-            "max_new_tokens": 1000,
-            "top_p": 0.9,
-            "top_k": 20,
-            "temperature": 0.1,  # Very low temperature for deterministic responses
+            "max_tokens": 1500,
+            "temperature": 0.7,  # Balance between natural conversation and accuracy
+            "top_p": 0.95,
+            "top_k": 50,
             "stop_sequences": []
         }
         
         message_list = [
             {"role": "user", "content": message_content},
-            {"role": "user", "content": [{"text": enhanced_prompt}]}
+            {"role": "user", "content": [{"text": query_context}]}
         ]
         
         request_body = {
@@ -526,11 +536,57 @@ Available sections: {', '.join(sections.keys())}"""
         client = ChatBedrock(model_id=model_id)
         
         response = client.invoke(json.dumps(request_body))
-        return response.content
+        response_content = response.content
+        
+        # Reference handling section:
+        if "I don't have any information about that in the provided documents" not in response_content:
+            if "References" not in response_content:
+                used_sources = {content['source'] for content in organized_content 
+                            if content.get('raw_text') and content['raw_text'] in response_content}
+                
+                if used_sources:
+                    # Create references with single bullet style
+                    references = "\n\n**References:**\n" + "".join(
+                        f"- {source}\n" for source in sorted(
+                            used_sources,
+                            key=lambda x: int(re.search(r'page (\d+)', x).group(1))
+                        )
+                    ).rstrip()
+                    response_content += references
+            else:
+                # Make References bold
+                response_content = re.sub(
+                    r'References:',
+                    r'**References:**',
+                    response_content
+                )
+                
+                # Remove all existing bullets and circles
+                response_content = re.sub(
+                    r'[•○*]\s*(\[Source:[^\]]+\])',
+                    r'- \1',
+                    response_content
+                )
+                
+                # Clean up any double bullets that might have been created
+                response_content = re.sub(
+                    r'-\s*-\s*(\[Source:[^\]]+\])',
+                    r'- \1',
+                    response_content
+                )
+                
+                # Ensure each reference is on its own line
+                response_content = re.sub(
+                    r'(\[Source:[^\]]+\])(?!\n)',
+                    r'\1\n',
+                    response_content
+                )
+        
+        return response_content
         
     except Exception as e:
         logger.error(f"Error invoking Claude-3: {str(e)}")
-        return f"### Error\n{str(e)}\n\nPlease try again or contact support if the problem persists."
+        return "I encountered an error while processing your request. Please try again."
 
 def clear_vector_store():
     """Clear all stored vectors and caches"""
