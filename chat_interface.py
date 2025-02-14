@@ -1,7 +1,6 @@
 import os
 import streamlit as st
 import logging
-from response_verifier import verify_response
 from rag_backend import (
     check_aws_credentials,
     load_or_initialize_stores,
@@ -41,32 +40,8 @@ def handle_clear_chat():
     st.rerun()
 
 def generate_and_verify_response(query, matched_items):
-    max_attempts = 3
-    attempt = 0
-    
-    while attempt < max_attempts:
-        response = invoke_claude_3_multimodal(query, matched_items)
-        is_valid, feedback = verify_response(response, matched_items, query)
-        
-        # Only log failed validations
-        if not is_valid:
-            logger.warning(f"\n{'='*50}")
-            logger.warning(f"Response Validation Failed - Attempt {attempt + 1}/{max_attempts}")
-            logger.warning(f"Query: {query}")
-            logger.warning("Feedback for improvement:")
-            for point in feedback:
-                logger.warning(f"- {point}")
-            logger.warning(f"{'='*50}\n")
-        
-        if is_valid:
-            return response
-        
-        attempt += 1
-        if attempt < max_attempts:
-            enhanced_query = f"{query}\n\nImprove the response considering: {'; '.join(feedback)}"
-            query = enhanced_query
-    
-    logger.warning("Maximum verification attempts reached. Returning best effort response.")
+    """Generate response without verification"""
+    response = invoke_claude_3_multimodal(query, matched_items)
     return response
 
 def main():
